@@ -285,6 +285,7 @@ int inet6_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
 	struct sock *sk = sock->sk;
 <<<<<<< HEAD
+<<<<<<< HEAD
 	struct inet_sock *inet = inet_sk(sk);
 	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct net *net = sock_net(sk);
@@ -292,6 +293,9 @@ int inet6_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	unsigned short snum;
 	bool saved_ipv6only;
 	int addr_type = 0;
+=======
+	const struct proto *prot;
+>>>>>>> 8a61bf6e06ef (BACKPORT: net: Introduce __inet_bind() and __inet6_bind)
 =======
 	const struct proto *prot;
 >>>>>>> 8a61bf6e06ef (BACKPORT: net: Introduce __inet_bind() and __inet6_bind)
