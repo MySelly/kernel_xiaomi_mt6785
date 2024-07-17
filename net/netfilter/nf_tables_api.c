@@ -148,18 +148,18 @@ static void __nft_set_trans_bind(const struct nft_ctx *ctx, struct nft_set *set,
 	struct net *net = ctx->net;
 	struct nft_trans *trans;
 
-	if (!nft_set_is_anonymous(set))
+	if (!(set->flags & NFT_SET_ANONYMOUS))
 		return;
 
 	list_for_each_entry_reverse(trans, &net->nft.commit_list, list) {
 		switch (trans->msg_type) {
 		case NFT_MSG_NEWSET:
 			if (nft_trans_set(trans) == set)
-				set->bound = true;
+				nft_trans_set_bound(trans) = bind;
 			break;
 		case NFT_MSG_NEWSETELEM:
 			if (nft_trans_elem_set(trans) == set)
-				set->bound = true;
+				nft_trans_elem_set_bound(trans) = bind;
 			break;
 		}
 	}
@@ -371,31 +371,6 @@ static int nft_trans_set_add(const struct nft_ctx *ctx, int msg_type,
 	return 0;
 }
 
-static void nft_setelem_data_deactivate(const struct net *net,
-					const struct nft_set *set,
-					struct nft_set_elem *elem);
-
-static int nft_mapelem_deactivate(const struct nft_ctx *ctx,
-				  struct nft_set *set,
-				  const struct nft_set_iter *iter,
-				  struct nft_set_elem *elem)
-{
-	nft_setelem_data_deactivate(ctx->net, set, elem);
-
-	return 0;
-}
-
-static void nft_map_deactivate(const struct nft_ctx *ctx, struct nft_set *set)
-{
-	struct nft_set_iter iter = {
-		.genmask	= nft_genmask_next(ctx->net),
-		.fn		= nft_mapelem_deactivate,
-	};
-
-	set->ops->walk(ctx, set, &iter);
-	WARN_ON_ONCE(iter.err);
-}
-
 static int nft_delset(const struct nft_ctx *ctx, struct nft_set *set)
 {
 	int err;
@@ -403,9 +378,6 @@ static int nft_delset(const struct nft_ctx *ctx, struct nft_set *set)
 	err = nft_trans_set_add(ctx, NFT_MSG_DELSET, set);
 	if (err < 0)
 		return err;
-
-	if (set->flags & (NFT_SET_MAP | NFT_SET_OBJECT))
-		nft_map_deactivate(ctx, set);
 
 	nft_deactivate_next(ctx->net, set);
 	nft_use_dec(&ctx->table->use);
@@ -898,7 +870,7 @@ static int nft_flush_table(struct nft_ctx *ctx)
 		if (!nft_is_active_next(ctx->net, set))
 			continue;
 
-		if (nft_set_is_anonymous(set) &&
+		if (set->flags & NFT_SET_ANONYMOUS &&
 		    !list_empty(&set->bindings))
 			continue;
 
@@ -3380,7 +3352,6 @@ static int nf_tables_newset(struct net *net, struct sock *nlsk,
 
 	INIT_LIST_HEAD(&set->bindings);
 	set->table = table;
-	write_pnet(&set->net, net);
 	set->ops   = ops;
 	set->ktype = ktype;
 	set->klen  = desc.klen;
@@ -3408,7 +3379,7 @@ static int nf_tables_newset(struct net *net, struct sock *nlsk,
 	return 0;
 
 err4:
-	ops->destroy(&ctx, set);
+	ops->destroy(set);
 err3:
 	kfree(set->name);
 err2:
@@ -3420,12 +3391,12 @@ err1:
 	return err;
 }
 
-static void nft_set_destroy(const struct nft_ctx *ctx, struct nft_set *set)
+static void nft_set_destroy(struct nft_set *set)
 {
 	if (WARN_ON(set->use > 0))
 		return;
 
-	set->ops->destroy(ctx, set);
+	set->ops->destroy(set);
 	module_put(set->ops->type->owner);
 	kfree(set->name);
 	kvfree(set);
@@ -3489,7 +3460,7 @@ int nf_tables_bind_set(const struct nft_ctx *ctx, struct nft_set *set,
 	struct nft_set_binding *i;
 	struct nft_set_iter iter;
 
-	if (!list_empty(&set->bindings) && nft_set_is_anonymous(set))
+	if (!list_empty(&set->bindings) && set->flags & NFT_SET_ANONYMOUS)
 		return -EBUSY;
 
 	if (binding->flags & NFT_SET_MAP) {
@@ -3529,7 +3500,7 @@ void nf_tables_unbind_set(const struct nft_ctx *ctx, struct nft_set *set,
 {
 	list_del_rcu(&binding->list);
 
-	if (list_empty(&set->bindings) && nft_set_is_anonymous(set)) {
+	if (list_empty(&set->bindings) && set->flags & NFT_SET_ANONYMOUS) {
 		list_del_rcu(&set->list);
 		if (event)
 			nf_tables_set_notify(ctx, set, NFT_MSG_DELSET,
@@ -3538,39 +3509,10 @@ void nf_tables_unbind_set(const struct nft_ctx *ctx, struct nft_set *set,
 }
 EXPORT_SYMBOL_GPL(nf_tables_unbind_set);
 
-static void nft_setelem_data_activate(const struct net *net,
-				      const struct nft_set *set,
-				      struct nft_set_elem *elem);
-
-static int nft_mapelem_activate(const struct nft_ctx *ctx,
-				struct nft_set *set,
-				const struct nft_set_iter *iter,
-				struct nft_set_elem *elem)
-{
-	nft_setelem_data_activate(ctx->net, set, elem);
-
-	return 0;
-}
-
-static void nft_map_activate(const struct nft_ctx *ctx, struct nft_set *set)
-{
-	struct nft_set_iter iter = {
-		.genmask	= nft_genmask_next(ctx->net),
-		.fn		= nft_mapelem_activate,
-	};
-
-	set->ops->walk(ctx, set, &iter);
-	WARN_ON_ONCE(iter.err);
-}
-
 void nf_tables_activate_set(const struct nft_ctx *ctx, struct nft_set *set)
 {
-	if (nft_set_is_anonymous(set)) {
-		if (set->flags & (NFT_SET_MAP | NFT_SET_OBJECT))
-			nft_map_activate(ctx, set);
-
+	if (set->flags & NFT_SET_ANONYMOUS)
 		nft_clear(ctx->net, set);
-	}
 
 	nft_use_inc_restore(&set->use);
 }
@@ -3583,7 +3525,7 @@ void nf_tables_deactivate_set(const struct nft_ctx *ctx, struct nft_set *set,
 	switch (phase) {
 	case NFT_TRANS_PREPARE_ERROR:
 		nft_set_trans_unbind(ctx, set);
-		if (nft_set_is_anonymous(set))
+		if (set->flags & NFT_SET_ANONYMOUS)
 			nft_deactivate_next(ctx->net, set);
 		else
 			list_del_rcu(&binding->list);
@@ -3591,20 +3533,13 @@ void nf_tables_deactivate_set(const struct nft_ctx *ctx, struct nft_set *set,
 		nft_use_dec(&set->use);
 		break;
 	case NFT_TRANS_PREPARE:
-		if (nft_set_is_anonymous(set)) {
-			if (set->flags & (NFT_SET_MAP | NFT_SET_OBJECT))
-				nft_map_deactivate(ctx, set);
-
+		if (set->flags & NFT_SET_ANONYMOUS)
 			nft_deactivate_next(ctx->net, set);
-		}
+
 		nft_use_dec(&set->use);
 		return;
 	case NFT_TRANS_ABORT:
 	case NFT_TRANS_RELEASE:
-		if (nft_set_is_anonymous(set) &&
-		    set->flags & (NFT_SET_MAP | NFT_SET_OBJECT))
-			nft_map_deactivate(ctx, set);
-
 		nft_use_dec(&set->use);
 		/* fall through */
 	default:
@@ -3616,8 +3551,8 @@ EXPORT_SYMBOL_GPL(nf_tables_deactivate_set);
 
 void nf_tables_destroy_set(const struct nft_ctx *ctx, struct nft_set *set)
 {
-	if (list_empty(&set->bindings) && nft_set_is_anonymous(set))
-		nft_set_destroy(ctx, set);
+	if (list_empty(&set->bindings) && set->flags & NFT_SET_ANONYMOUS)
+		nft_set_destroy(set);
 }
 EXPORT_SYMBOL_GPL(nf_tables_destroy_set);
 
@@ -3787,11 +3722,7 @@ static int nf_tables_dump_setelem(const struct nft_ctx *ctx,
 				  const struct nft_set_iter *iter,
 				  struct nft_set_elem *elem)
 {
-	const struct nft_set_ext *ext = nft_set_elem_ext(set, elem->priv);
 	struct nft_set_dump_args *args;
-
-	if (nft_set_elem_expired(ext))
-		return 0;
 
 	args = container_of(iter, struct nft_set_dump_args, iter);
 	return nf_tables_fill_setelem(args->skb, set, elem);
@@ -4071,39 +4002,33 @@ void *nft_set_elem_init(const struct nft_set *set,
 	return elem;
 }
 
-/* Drop references and destroy. Called from gc, dynset and abort path. */
 void nft_set_elem_destroy(const struct nft_set *set, void *elem,
 			  bool destroy_expr)
 {
 	struct nft_set_ext *ext = nft_set_elem_ext(set, elem);
-	struct nft_ctx ctx = {
-		.net	= read_pnet(&set->net),
-	};
 
 	nft_data_release(nft_set_ext_key(ext), NFT_DATA_VALUE);
 	if (nft_set_ext_exists(ext, NFT_SET_EXT_DATA))
 		nft_data_release(nft_set_ext_data(ext), set->dtype);
 	if (destroy_expr && nft_set_ext_exists(ext, NFT_SET_EXT_EXPR))
-		nf_tables_expr_destroy(&ctx, nft_set_ext_expr(ext));
+		nf_tables_expr_destroy(NULL, nft_set_ext_expr(ext));
 	if (nft_set_ext_exists(ext, NFT_SET_EXT_OBJREF))
 		nft_use_dec(&(*nft_set_ext_obj(ext))->use);
 	kfree(elem);
 }
 EXPORT_SYMBOL_GPL(nft_set_elem_destroy);
 
-/* Destroy element. References have been already dropped in the preparation
- * path via nft_setelem_data_deactivate().
+/* Only called from commit path, nft_set_elem_deactivate() already deals with
+ * the refcounting from the preparation phase.
  */
-void nf_tables_set_elem_destroy(const struct nft_ctx *ctx,
-				const struct nft_set *set, void *elem)
+static void nf_tables_set_elem_destroy(const struct nft_set *set, void *elem)
 {
 	struct nft_set_ext *ext = nft_set_elem_ext(set, elem);
 
 	if (nft_set_ext_exists(ext, NFT_SET_EXT_EXPR))
-		nf_tables_expr_destroy(ctx, nft_set_ext_expr(ext));
+		nf_tables_expr_destroy(NULL, nft_set_ext_expr(ext));
 	kfree(elem);
 }
-EXPORT_SYMBOL_GPL(nf_tables_set_elem_destroy);
 
 static int nft_setelem_parse_flags(const struct nft_set *set,
 				   const struct nlattr *attr, u32 *flags)
@@ -4427,9 +4352,9 @@ void nft_data_hold(const struct nft_data *data, enum nft_data_types type)
 	}
 }
 
-static void nft_setelem_data_activate(const struct net *net,
-				      const struct nft_set *set,
-				      struct nft_set_elem *elem)
+static void nft_set_elem_activate(const struct net *net,
+				  const struct nft_set *set,
+				  struct nft_set_elem *elem)
 {
 	const struct nft_set_ext *ext = nft_set_elem_ext(set, elem->priv);
 
@@ -4439,9 +4364,9 @@ static void nft_setelem_data_activate(const struct net *net,
 		nft_use_inc_restore(&(*nft_set_ext_obj(ext))->use);
 }
 
-static void nft_setelem_data_deactivate(const struct net *net,
-					const struct nft_set *set,
-					struct nft_set_elem *elem)
+static void nft_set_elem_deactivate(const struct net *net,
+				    const struct nft_set *set,
+				    struct nft_set_elem *elem)
 {
 	const struct nft_set_ext *ext = nft_set_elem_ext(set, elem->priv);
 
@@ -4508,7 +4433,7 @@ static int nft_del_setelem(struct nft_ctx *ctx, struct nft_set *set,
 	kfree(elem.priv);
 	elem.priv = priv;
 
-	nft_setelem_data_deactivate(ctx->net, set, &elem);
+	nft_set_elem_deactivate(ctx->net, set, &elem);
 
 	nft_trans_elem(trans) = elem;
 	list_add_tail(&trans->list, &ctx->net->nft.commit_list);
@@ -4542,7 +4467,7 @@ static int nft_flush_set(const struct nft_ctx *ctx,
 	}
 	set->ndeact++;
 
-	nft_setelem_data_deactivate(ctx->net, set, elem);
+	nft_set_elem_deactivate(ctx->net, set, elem);
 	nft_trans_elem_set(trans) = set;
 	nft_trans_elem(trans) = *elem;
 	list_add_tail(&trans->list, &ctx->net->nft.commit_list);
@@ -5372,11 +5297,10 @@ static void nf_tables_commit_release(struct nft_trans *trans)
 		nf_tables_rule_destroy(&trans->ctx, nft_trans_rule(trans));
 		break;
 	case NFT_MSG_DELSET:
-		nft_set_destroy(&trans->ctx, nft_trans_set(trans));
+		nft_set_destroy(nft_trans_set(trans));
 		break;
 	case NFT_MSG_DELSETELEM:
-		nf_tables_set_elem_destroy(&trans->ctx,
-					   nft_trans_elem_set(trans),
+		nf_tables_set_elem_destroy(nft_trans_elem_set(trans),
 					   nft_trans_elem(trans).priv);
 		break;
 	case NFT_MSG_DELOBJ:
@@ -5462,7 +5386,7 @@ static int nf_tables_commit(struct net *net, struct sk_buff *skb)
 			/* This avoids hitting -EBUSY when deleting the table
 			 * from the transaction.
 			 */
-			if (nft_set_is_anonymous(nft_trans_set(trans)) &&
+			if (nft_trans_set(trans)->flags & NFT_SET_ANONYMOUS &&
 			    !list_empty(&nft_trans_set(trans)->bindings))
 				nft_use_dec(&trans->ctx.table->use);
 
@@ -5533,7 +5457,8 @@ static void nf_tables_abort_release(struct nft_trans *trans)
 		nf_tables_rule_destroy(&trans->ctx, nft_trans_rule(trans));
 		break;
 	case NFT_MSG_NEWSET:
-		nft_set_destroy(&trans->ctx, nft_trans_set(trans));
+		if (!nft_trans_set_bound(trans))
+			nft_set_destroy(nft_trans_set(trans));
 		break;
 	case NFT_MSG_NEWSETELEM:
 		nft_set_elem_destroy(nft_trans_elem_set(trans),
@@ -5605,7 +5530,7 @@ static int nf_tables_abort(struct net *net, struct sk_buff *skb)
 			break;
 		case NFT_MSG_NEWSET:
 			nft_use_dec_restore(&trans->ctx.table->use);
-			if (nft_trans_set(trans)->bound) {
+			if (nft_trans_set_bound(trans)) {
 				nft_trans_destroy(trans);
 				break;
 			}
@@ -5614,23 +5539,22 @@ static int nf_tables_abort(struct net *net, struct sk_buff *skb)
 		case NFT_MSG_DELSET:
 			nft_use_inc_restore(&trans->ctx.table->use);
 			nft_clear(trans->ctx.net, nft_trans_set(trans));
-			if (nft_trans_set(trans)->flags & (NFT_SET_MAP | NFT_SET_OBJECT))
-				nft_map_activate(&trans->ctx, nft_trans_set(trans));
 			nft_trans_destroy(trans);
 			break;
 		case NFT_MSG_NEWSETELEM:
-			if (nft_trans_elem_set(trans)->bound) {
+			if (nft_trans_elem_set_bound(trans)) {
 				nft_trans_destroy(trans);
 				break;
 			}
 			te = (struct nft_trans_elem *)trans->data;
+
 			te->set->ops->remove(net, te->set, &te->elem);
 			atomic_dec(&te->set->nelems);
 			break;
 		case NFT_MSG_DELSETELEM:
 			te = (struct nft_trans_elem *)trans->data;
 
-			nft_setelem_data_activate(net, te->set, &te->elem);
+			nft_set_elem_activate(net, te->set, &te->elem);
 			te->set->ops->activate(net, te->set, &te->elem);
 			te->set->ndeact--;
 
@@ -6260,10 +6184,7 @@ static void __nft_release_afinfo(struct net *net, struct nft_af_info *afi)
 		list_for_each_entry_safe(set, ns, &table->sets, list) {
 			list_del(&set->list);
 			nft_use_dec(&table->use);
-			if (set->flags & (NFT_SET_MAP | NFT_SET_OBJECT))
-				nft_map_deactivate(&ctx, set);
-
-			nft_set_destroy(&ctx, set);
+			nft_set_destroy(set);
 		}
 		list_for_each_entry_safe(obj, ne, &table->objects, list) {
 			list_del(&obj->list);
